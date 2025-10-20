@@ -15,6 +15,7 @@ parser = OptionParser.new do |opts|
 
   opts.on("-p", "--port PORT", "Is the port on which the caching proxy server will run") { |t| options[:port] = t.to_i }
   opts.on("-o", "--origin ORIGIN", "Is the URL of the server to which the requests will be forwarded") { |t| options[:origin] = t }
+  opts.on("-c", "--clear_cache", "Clear cache (remove all keys saved)") { |t| options[:clear_cache] = t }
 
   opts.on("-h", "--help", "Show helps") { puts opts; exit }
 end
@@ -26,7 +27,11 @@ rescue OptionParser::ParseError => e
   warn parser
 end
 
-if options[:port].nil? || options[:origin].nil?
+if options[:clear_cache]
+  redis.flushall
+  puts "Keys after flushall: #{redis.keys}"
+  exit
+elsif options[:port].nil? || options[:origin].nil?
   warn "Missing Port or Origin. \n\n#{parser}"
   exit 2
 elsif redis.to_s.strip.nil?
@@ -38,18 +43,44 @@ server = WEBrick::HTTPServer.new(Port: options[:port])
 trap 'INT' do server.shutdown end
 
 server.mount_proc '/' do |req, res|
-  key = "#{options[:origin]}#{req.path}"
+  uri = URI.join(options[:origin], req.path)
+  qs = req.query_string.to_s
+  uri.query = qs unless qs.empty?
+
+  key = "#{req.request_method} #{uri}"
 
   if (cache = redis.get(key))
-    parsed = JSON.parse(cache)
-    puts "Cache HITED"
+    entry = JSON.parse(cache)
+    res.status = entry["status"]
+    res['Content-Type'] = entry["content_type"] if entry["content_type"]
+    res['X-Cache'] = 'HIT'
+    res.body = entry["body"]
   else
-    response = Net::HTTP.get_response(URI.parse(key))
-    parsed = JSON.parse(response.body)
-    redis.set(key, parsed.to_json, ex: 15 * 60)
-  end
+    begin
+      response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+        http.read_timeout = 5
+        http.request(Net::HTTP::Get.new(uri.request_uri))
+      end
 
-  res.body = JSON.pretty_generate(parsed.to_json)
+      entry = {
+        "status" => response.code.to_i,
+        "content_type" => response['content-type'],
+        "body" => response.body
+      }
+
+      redis.set(key, JSON.generate(entry), ex: 15 * 60)
+
+      res.status = entry["status"]
+      res['Content-Type'] = entry["content_type"] if entry["content_type"]
+      res['X-Cache'] = 'MISS'
+      res.body = entry["body"]
+    rescue => e
+      res.status = 502
+      res['Content-Type'] = 'text/plain'
+      res['X-Cache'] = 'MISS'
+      res.body = "Bad Gatway: #{e.class} - #{e.message}"
+    end
+  end
 end
 
 server.start
