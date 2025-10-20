@@ -1,3 +1,5 @@
+#! /usr/bin/env ruby
+
 require "redis"
 require "optparse"
 require "dotenv/load"
@@ -7,7 +9,7 @@ require "webrick/httpproxy"
 require "net/http"
 require "json"
 
-redis = Redis.new(url: ENV.fetch("REDIS_URL", nil))
+redis = Redis.new(url: ENV.fetch("REDIS_URL", "redis://127.0.0.1:6379/0"))
 options = {}
 
 parser = OptionParser.new do |opts|
